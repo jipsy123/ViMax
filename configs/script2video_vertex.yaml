@@ -1,0 +1,47 @@
+# ViMax Configuration for Google Vertex AI
+# Uses Vertex AI Imagen 3 + Veo 3 for image and video generation
+
+chat_model:
+  init_args:
+    # Option 1: Use Vertex AI Gemini (recommended for full Google stack)
+    model: gemini-2.5-flash
+    model_provider: google_vertexai
+    project: YOUR_GCP_PROJECT_ID  # Replace with your GCP project ID
+    location: us-central1
+
+    # Option 2: Use OpenRouter (if you prefer)
+    # model: google/gemini-2.5-flash-lite-preview-09-2025
+    # model_provider: openai
+    # api_key: YOUR_OPENROUTER_API_KEY
+    # base_url: https://openrouter.ai/api/v1
+
+  # Rate limits for chat model API calls
+  # Set to null to disable rate limiting
+  max_requests_per_minute: null
+  max_requests_per_day: null
+
+image_generator:
+  class_path: tools.ImageGeneratorImagen3VertexAPI
+  init_args:
+    project_id: YOUR_GCP_PROJECT_ID  # Replace with your GCP project ID
+    location: us-central1
+    model_name: imagen-3.0-generate-001
+
+  # Rate limits for image generation API calls
+  max_requests_per_minute: 30
+  max_requests_per_day: 1000
+
+video_generator:
+  class_path: tools.VideoGeneratorVeo3VertexAPI
+  init_args:
+    project_id: YOUR_GCP_PROJECT_ID  # Replace with your GCP project ID
+    location: us-central1
+    t2v_model: veo-3-001
+    ff2v_model: veo-3-001
+    flf2v_model: veo-3-001
+
+  # Rate limits for video generation API calls
+  max_requests_per_minute: 10
+  max_requests_per_day: 100
+
+working_dir: .working_dir/script2video_vertex
