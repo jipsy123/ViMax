@@ -2,15 +2,12 @@ import asyncio
 from pipelines.storyboard2video_pipeline import Storyboard2VideoPipeline
 
 
-# SET YOUR STORYBOARD IMAGE PATH HERE
-storyboard_image_path = "path/to/your/storyboard.png"
-
-# Optional: override the auto-detected style from the storyboard
-# If None, style is automatically inferred from the storyboard's visual style
-style = None
-
-
 async def main():
+    storyboard_image_path = input("Enter the path to your storyboard image: ").strip()
+
+    style_input = input("Enter visual style (or press Enter to auto-detect from storyboard): ").strip()
+    style = style_input if style_input else None
+
     pipeline = Storyboard2VideoPipeline.init_from_config(
         config_path="configs/storyboard2video.yaml"
     )
