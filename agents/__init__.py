@@ -7,7 +7,6 @@ from .reference_image_selector import ReferenceImageSelector
 from .storyboard_analyzer import StoryboardAnalyzer
 from .panel_analyzer import PanelAnalyzer
 from .visual_character_extractor import VisualCharacterExtractor
-from .scene_script_writer import SceneScriptWriter
 
 __all__ = [
     "Screenwriter",
@@ -19,5 +18,4 @@ __all__ = [
     "StoryboardAnalyzer",
     "PanelAnalyzer",
     "VisualCharacterExtractor",
-    "SceneScriptWriter",
 ]

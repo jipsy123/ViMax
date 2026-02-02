@@ -2,7 +2,7 @@ import os
 import json
 import logging
 import asyncio
-from typing import List, Dict, Optional, Tuple
+from typing import List, Dict, Optional
 from moviepy import VideoFileClip, concatenate_videoclips
 import yaml
 from langchain.chat_models import init_chat_model
@@ -12,8 +12,8 @@ from agents import (
     StoryboardAnalyzer,
     PanelAnalyzer,
     VisualCharacterExtractor,
-    SceneScriptWriter,
     CharacterPortraitsGenerator,
+    ReferenceImageSelector,
 )
 from interfaces import (
     StoryboardMeta,
@@ -21,7 +21,6 @@ from interfaces import (
     VisualCharacter,
     CharacterInScene,
 )
-from pipelines.script2video_pipeline import Script2VideoPipeline
 from utils.storyboard_splitter import StoryboardSplitter
 from utils.rate_limiter import RateLimiter
 
@@ -45,16 +44,14 @@ class Storyboard2VideoPipeline:
         splitter_config = storyboard_splitter_config or {}
         self.storyboard_splitter = StoryboardSplitter(**splitter_config)
 
-        # New agents
+        # Agents
         self.storyboard_analyzer = StoryboardAnalyzer(chat_model=self.chat_model)
         self.panel_analyzer = PanelAnalyzer(chat_model=self.chat_model)
         self.visual_character_extractor = VisualCharacterExtractor(chat_model=self.chat_model)
-        self.scene_script_writer = SceneScriptWriter(chat_model=self.chat_model)
-
-        # Existing reusable agent
         self.character_portraits_generator = CharacterPortraitsGenerator(
             image_generator=self.image_generator
         )
+        self.reference_image_selector = ReferenceImageSelector(chat_model=self.chat_model)
 
     @classmethod
     def init_from_config(cls, config_path: str):
@@ -183,59 +180,24 @@ class Storyboard2VideoPipeline:
             style=style,
         )
 
-        # Step 7: Scene Script Generation
-        scene_scripts = await self.write_scene_scripts(
-            panel_analyses, visual_characters, storyboard_meta
+        # Step 7: Generate panel videos (1 frame + 1 video per panel, parallelized)
+        video_paths = await self.generate_panel_videos(
+            panel_paths=panel_paths,
+            panel_analyses=panel_analyses,
+            visual_characters=visual_characters,
+            characters=characters,
+            character_portraits_registry=character_portraits_registry,
+            storyboard_meta=storyboard_meta,
+            style=style,
         )
 
-        # Step 8: Per-Scene Video Generation via Script2VideoPipeline
-        all_video_paths = []
-
-        for idx, scene_script in enumerate(scene_scripts):
-            scene_working_dir = os.path.join(self.working_dir, f"scene_{idx}")
-            os.makedirs(scene_working_dir, exist_ok=True)
-
-            # Build additional reference images from the source panel
-            additional_reference_images = self._build_panel_references(
-                idx, panel_analyses, panel_paths
-            )
-
-            # Build user_requirement from storyboard meta
-            user_requirement = (
-                f"Tone: {storyboard_meta.tone}. "
-                f"Genre: {storyboard_meta.genre}. "
-                f"Visual style: {style}. "
-                f"Maintain visual consistency with the storyboard's composition and framing."
-            )
-
-            script2video_pipeline = Script2VideoPipeline(
-                chat_model=self.chat_model,
-                image_generator=self.image_generator,
-                video_generator=self.video_generator,
-                working_dir=scene_working_dir,
-            )
-
-            print(f"\n{'='*60}")
-            print(f"🎬 Starting Scene {idx} (from panel {idx})")
-            print(f"{'='*60}")
-
-            final_video_path = await script2video_pipeline(
-                script=scene_script,
-                user_requirement=user_requirement,
-                style=style,
-                characters=characters,
-                character_portraits_registry=character_portraits_registry,
-                additional_reference_images=additional_reference_images,
-            )
-            all_video_paths.append(final_video_path)
-
-        # Step 9: Concatenate Scene Videos
+        # Step 8: Concatenate Panel Videos
         final_video_path = os.path.join(self.working_dir, "final_video.mp4")
         if os.path.exists(final_video_path):
             print(f"🚀 Skipped concatenating videos, already exists.")
         else:
             print(f"🎬 Starting concatenating videos...")
-            video_clips = [VideoFileClip(p) for p in all_video_paths]
+            video_clips = [VideoFileClip(p) for p in video_paths]
             final_video = concatenate_videoclips(video_clips)
             final_video.write_videofile(final_video_path, codec="libx264", preset="medium")
             print(f"☑️ Concatenated videos, saved to {final_video_path}.")
@@ -461,52 +423,179 @@ class Storyboard2VideoPipeline:
             }
         }
 
-    async def write_scene_scripts(
+    # ─────────────────────────────────────────────
+    # Step 7: Direct panel → frame → video
+    # ─────────────────────────────────────────────
+
+    def _build_panel_to_character_map(
         self,
+        visual_characters: List[VisualCharacter],
+        num_panels: int,
+    ) -> Dict[int, List[int]]:
+        """
+        Build a mapping from panel_idx → list of character indices
+        using VisualCharacter.panel_appearances.
+        """
+        panel_char_map: Dict[int, List[int]] = {i: [] for i in range(num_panels)}
+        for char_idx, vc in enumerate(visual_characters):
+            for panel_idx in vc.panel_appearances:
+                if panel_idx in panel_char_map:
+                    panel_char_map[panel_idx].append(char_idx)
+        return panel_char_map
+
+    async def generate_panel_videos(
+        self,
+        panel_paths: List[str],
         panel_analyses: List[PanelAnalysis],
         visual_characters: List[VisualCharacter],
+        characters: List[CharacterInScene],
+        character_portraits_registry: Dict[str, Dict[str, Dict[str, str]]],
         storyboard_meta: StoryboardMeta,
+        style: str,
     ) -> List[str]:
-        """Step 7: Generate scene scripts with caching."""
-        scripts_path = os.path.join(self.working_dir, "scene_scripts.json")
+        """
+        Step 7: Generate one frame image + one video for each panel.
+        All panels are processed in parallel (rate limiters handle throttling).
 
-        if os.path.exists(scripts_path):
-            with open(scripts_path, "r", encoding="utf-8") as f:
-                scripts = json.load(f)
-            print(f"🚀 Loaded {len(scripts)} scene scripts from existing file.")
-            return scripts
-
-        print("🧠 Writing scene scripts from panel analyses...")
-        scripts = await self.scene_script_writer.write_scene_scripts(
-            panel_analyses=panel_analyses,
-            characters=visual_characters,
-            storyboard_meta=storyboard_meta,
+        Returns:
+            Ordered list of video paths, one per panel.
+        """
+        panel_char_map = self._build_panel_to_character_map(
+            visual_characters, len(panel_paths)
         )
 
-        with open(scripts_path, "w", encoding="utf-8") as f:
-            json.dump(scripts, f, ensure_ascii=False, indent=4)
-        print(f"✅ Generated {len(scripts)} scene scripts and saved to {scripts_path}.")
-
-        return scripts
-
-    def _build_panel_references(
-        self,
-        scene_idx: int,
-        panel_analyses: List[PanelAnalysis],
-        panel_paths: List[str],
-    ) -> List[Tuple[str, str]]:
-        """Build additional reference image pairs from the source panel for this scene."""
-        references = []
-
-        # 1:1 mapping — scene_idx corresponds to panel_idx
-        if scene_idx < len(panel_paths) and scene_idx < len(panel_analyses):
-            pa = panel_analyses[scene_idx]
-            description = (
-                f"Storyboard reference panel. "
-                f"Camera: {pa.camera_angle}. "
-                f"Scene: {pa.scene_description[:150]}. "
-                f"Use this as composition and framing reference."
+        tasks = [
+            self.generate_video_for_single_panel(
+                panel_idx=idx,
+                panel_path=panel_paths[idx],
+                panel_analysis=panel_analyses[idx],
+                characters=characters,
+                character_portraits_registry=character_portraits_registry,
+                panel_char_map=panel_char_map,
+                storyboard_meta=storyboard_meta,
+                style=style,
             )
-            references.append((panel_paths[scene_idx], description))
+            for idx in range(len(panel_paths))
+        ]
 
-        return references
+        video_paths = list(await asyncio.gather(*tasks))
+        return video_paths
+
+    async def generate_video_for_single_panel(
+        self,
+        panel_idx: int,
+        panel_path: str,
+        panel_analysis: PanelAnalysis,
+        characters: List[CharacterInScene],
+        character_portraits_registry: Dict[str, Dict[str, Dict[str, str]]],
+        panel_char_map: Dict[int, List[int]],
+        storyboard_meta: StoryboardMeta,
+        style: str,
+    ) -> str:
+        """
+        Generate a single frame image and a single video for one panel.
+
+        Flow:
+            1. Build reference image pool (character portraits + panel image)
+            2. Build frame prompt from PanelAnalysis fields
+            3. ReferenceImageSelector → select best refs + generate optimized prompt
+            4. image_generator → 1 frame image
+            5. video_generator → 1 video clip
+
+        Returns:
+            Path to the generated video.
+        """
+        panel_dir = os.path.join(self.working_dir, "frames", str(panel_idx))
+        os.makedirs(panel_dir, exist_ok=True)
+
+        video_path = os.path.join(panel_dir, "video.mp4")
+
+        # Early exit if video already cached
+        if os.path.exists(video_path):
+            print(f"🚀 Skipped panel {panel_idx}, video already exists.")
+            return video_path
+
+        # ── 1. Build available reference images ──
+        available_images = []
+
+        # Add character portraits for characters visible in this panel
+        char_indices = panel_char_map.get(panel_idx, [])
+        for char_idx in char_indices:
+            identifier = characters[char_idx].identifier_in_scene
+            if identifier in character_portraits_registry:
+                registry_item = character_portraits_registry[identifier]
+                for view, item in registry_item.items():
+                    available_images.append((item["path"], item["description"]))
+
+        # Add the original panel image as composition reference
+        panel_desc = (
+            f"Storyboard reference panel. "
+            f"Camera: {panel_analysis.camera_angle}. "
+            f"Scene: {panel_analysis.scene_description[:150]}. "
+            f"Use this as composition and framing reference."
+        )
+        available_images.append((panel_path, panel_desc))
+
+        # ── 2. Build frame prompt from PanelAnalysis ──
+        frame_prompt = (
+            f"Style: {style}. "
+            f"{panel_analysis.environment} "
+            f"{panel_analysis.scene_description} "
+            f"Camera: {panel_analysis.camera_angle}. "
+            f"Mood: {panel_analysis.mood}."
+        )
+
+        # ── 3. ReferenceImageSelector ──
+        selector_output_path = os.path.join(panel_dir, "selector_output.json")
+        if os.path.exists(selector_output_path):
+            with open(selector_output_path, 'r', encoding='utf-8') as f:
+                selector_output = json.load(f)
+            print(f"🚀 Loaded existing reference selection for panel {panel_idx}.")
+        else:
+            print(f"🔍 Selecting reference images for panel {panel_idx}...")
+            selector_output = await self.reference_image_selector.select_reference_images_and_generate_prompt(
+                available_image_path_and_text_pairs=available_images,
+                frame_description=frame_prompt,
+            )
+            with open(selector_output_path, 'w', encoding='utf-8') as f:
+                json.dump(selector_output, f, ensure_ascii=False, indent=4)
+            print(f"☑️ Selected references for panel {panel_idx}.")
+
+        reference_pairs = selector_output["reference_image_path_and_text_pairs"]
+        prompt = selector_output["text_prompt"]
+
+        # Build the final prompt with reference image descriptions
+        prefix_prompt = ""
+        for i, (image_path, text) in enumerate(reference_pairs):
+            prefix_prompt += f"Image {i}: {text}\n"
+        combined_prompt = f"{prefix_prompt}\n{prompt}"
+        reference_image_paths = [item[0] for item in reference_pairs]
+
+        # ── 4. Generate frame image ──
+        frame_path = os.path.join(panel_dir, "frame.png")
+        if os.path.exists(frame_path):
+            print(f"🚀 Skipped frame generation for panel {panel_idx}, already exists.")
+        else:
+            print(f"🖼️ Generating frame for panel {panel_idx}...")
+            frame_image = await self.image_generator.generate_single_image(
+                prompt=combined_prompt,
+                reference_image_paths=reference_image_paths,
+                size="1600x900",
+            )
+            frame_image.save(frame_path)
+            print(f"☑️ Generated frame for panel {panel_idx}, saved to {frame_path}.")
+
+        # ── 5. Generate video from frame ──
+        motion_prompt = panel_analysis.implied_action
+        if panel_analysis.implied_audio:
+            motion_prompt += f"\n{panel_analysis.implied_audio}"
+
+        print(f"🎬 Generating video for panel {panel_idx}...")
+        video_output = await self.video_generator.generate_single_video(
+            prompt=motion_prompt,
+            reference_image_paths=[frame_path],
+        )
+        video_output.save(video_path)
+        print(f"☑️ Generated video for panel {panel_idx}, saved to {video_path}.")
+
+        return video_path

@@ -131,7 +131,6 @@ class Script2VideoPipeline:
         style: str,
         characters: List[CharacterInScene] = None,
         character_portraits_registry: Optional[Dict[str, Dict[str, Dict[str, str]]]] = None,
-        additional_reference_images: Optional[List[Tuple[str, str]]] = None,
     ):
         if characters is None:
             characters = await self.extract_characters(script=script)
@@ -194,7 +193,6 @@ class Script2VideoPipeline:
                 characters=characters,
                 character_portraits_registry=character_portraits_registry,
                 priority_shot_idxs=priority_shot_idxs,
-                additional_reference_images=additional_reference_images,
             )
             for camera in camera_tree
         ]
@@ -231,7 +229,6 @@ class Script2VideoPipeline:
         characters: List[CharacterInScene],
         character_portraits_registry: Dict[str, Dict[str, Dict[str, str]]],
         priority_shot_idxs: List[int],
-        additional_reference_images: Optional[List[Tuple[str, str]]] = None,
     ):
         # 1. generate the first_frame of the first shot of the camera
         first_shot_idx = camera.active_shot_idxs[0]
@@ -250,10 +247,6 @@ class Script2VideoPipeline:
                 registry_item = character_portraits_registry[identifier_in_scene]
                 for view, item in registry_item.items():
                     available_image_path_and_text_pairs.append((item["path"], item["description"]))
-
-            # Add any additional reference images (e.g., storyboard panel images)
-            if additional_reference_images:
-                available_image_path_and_text_pairs.extend(additional_reference_images)
 
             # generate the first_frame based on the shot_description.ff_desc
             if camera.parent_shot_idx is not None:
@@ -342,7 +335,6 @@ class Script2VideoPipeline:
                 frame_desc=shot_descriptions[first_shot_idx].lf_desc,
                 visible_characters=[characters[idx] for idx in shot_descriptions[first_shot_idx].lf_vis_char_idxs],
                 character_portraits_registry=character_portraits_registry,
-                additional_reference_images=additional_reference_images,
             )
             normal_tasks.append(task)
 
@@ -354,7 +346,6 @@ class Script2VideoPipeline:
                     frame_desc=shot_descriptions[shot_idx].ff_desc,
                     visible_characters=[characters[idx] for idx in shot_descriptions[shot_idx].ff_vis_char_idxs],
                     character_portraits_registry=character_portraits_registry,
-                    additional_reference_images=additional_reference_images,
                 )
             if shot_idx in priority_shot_idxs:
                 priority_tasks.append(first_frame_task)
@@ -370,7 +361,6 @@ class Script2VideoPipeline:
                     frame_desc=shot_descriptions[shot_idx].lf_desc,
                     visible_characters=[characters[idx] for idx in shot_descriptions[shot_idx].lf_vis_char_idxs],
                     character_portraits_registry=character_portraits_registry,
-                    additional_reference_images=additional_reference_images,
                 )
                 normal_tasks.append(last_frame_task)
 
@@ -413,7 +403,6 @@ class Script2VideoPipeline:
         frame_desc: str,
         visible_characters: List[CharacterInScene],
         character_portraits_registry: Dict[str, Dict[str, Dict[str, str]]],
-        additional_reference_images: Optional[List[Tuple[str, str]]] = None,
     ) -> ImageOutput:
 
         frame_image_path = os.path.join(self.working_dir, "shots", f"{shot_idx}", f"{frame_type}.png")
@@ -431,10 +420,6 @@ class Script2VideoPipeline:
                     available_image_path_and_text_pairs.append((item["path"], item["description"]))
 
             available_image_path_and_text_pairs.append(first_shot_ff_path_and_text_pair)
-
-            # Add any additional reference images (e.g., storyboard panel images)
-            if additional_reference_images:
-                available_image_path_and_text_pairs.extend(additional_reference_images)
 
             selector_output_path = os.path.join(self.working_dir, "shots", f"{shot_idx}", f"{frame_type}_selector_output.json")
             if os.path.exists(selector_output_path):
