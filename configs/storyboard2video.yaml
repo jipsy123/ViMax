@@ -1,0 +1,37 @@
+chat_model:
+  init_args:
+    model: google/gemini-2.5-flash-lite-preview-09-2025
+    model_provider: openai
+    api_key:
+    base_url: https://openrouter.ai/api/v1
+  # Rate limits for chat model API calls
+  # Storyboard2Video makes more LLM calls (holistic + per-panel + character + script)
+  # Set to null to disable rate limiting for this service
+  max_requests_per_minute: 500
+  max_requests_per_day: 2000
+
+image_generator:
+  class_path: tools.ImageGeneratorNanobananaGoogleAPI
+  init_args:
+    api_key:
+  # Rate limits for image generation API calls
+  # Set to null to disable rate limiting for this service
+  max_requests_per_minute: 10
+  max_requests_per_day: 500
+
+video_generator:
+  class_path: tools.VideoGeneratorVeoGoogleAPI
+  init_args:
+    api_key:
+  # Rate limits for video generation API calls
+  # Set to null to disable rate limiting for this service
+  max_requests_per_minute: 2
+  max_requests_per_day: 10
+
+# Storyboard splitter settings (optional — defaults used if omitted)
+# storyboard_splitter:
+#   border_color_threshold: 50    # Pixel intensity below which is 'black' border
+#   min_panel_area_ratio: 0.005   # Minimum panel area as fraction of total image
+#   padding: 5                    # Pixels to inset from border when cropping
+
+working_dir: .working_dir/storyboard2video
